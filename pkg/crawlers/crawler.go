@@ -67,7 +67,7 @@ func (c *crawler) Traverse(startUrl string) ([]*models.Url, error) {
 	c.logger.Debug("Crawler: scanned the start URL", utils.InJSON(result))
 
 	// handler processes URL extracting all links from the page
-	handler := func(v interface{}) error {
+	var handler workerPools.WorkerHandler = func(v interface{}) error {
 		ctx, ok := v.(*models.CrawlerContext)
 		if !ok {
 			return fmt.Errorf("Crawler: unknown type of input: %T", v)
@@ -86,7 +86,7 @@ func (c *crawler) Traverse(startUrl string) ([]*models.Url, error) {
 	}
 
 	// start workers and add all links extracted from the start URL to the task queue
-	if err := c.workerPool.Init(handler); err != nil {
+	if _, err := c.workerPool.Init(handler); err != nil {
 		return nil, fmt.Errorf("Crawler: could not initialize worker pool: %s", err.Error())
 	}
 	c.logger.Debug("Crawler: worker pool initialized")

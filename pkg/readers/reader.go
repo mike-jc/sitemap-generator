@@ -95,10 +95,22 @@ func (r *reader) doOrRetry(method string, url string, reqBody io.Reader) (resp *
 		if err == nil {
 			return
 		}
+		if IsTimeout(err) || IsTooManyRedirects(err) {
+			return
+		}
 		if attempt < r.maxRetries {
 			attempt++
 		} else {
+			err = fmt.Errorf("Maximum retries exceeded with error: %s", err.Error())
 			return
 		}
 	}
+}
+
+func IsTimeout(err error) bool {
+	return strings.Contains(err.Error(), "context deadline exceeded")
+}
+
+func IsTooManyRedirects(err error) bool {
+	return strings.Contains(err.Error(), "too many redirects")
 }

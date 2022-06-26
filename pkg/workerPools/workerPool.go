@@ -3,6 +3,7 @@ package workerPools
 import (
 	"fmt"
 	"sitemap-generator/services"
+	"sitemap-generator/utils"
 	"sync"
 )
 
@@ -18,7 +19,7 @@ type NeedsTaskFunc func(v interface{}) bool
 
 // WorkerPool allows to process tasks in parallel by limited number of the workers
 type WorkerPool interface {
-	Init(handler WorkerHandler) error
+	Init(handler WorkerHandler) (startedWorkers int, err error)
 	Dispatch(v interface{}, needsTask NeedsTaskFunc)
 	WaitFinalize()
 	Results() ([]interface{}, error)
@@ -46,7 +47,7 @@ func NewWorkerPool(logger services.Logger, workersCount int) WorkerPool {
 }
 
 // Init starts specified number of workers which expect new tasks from the queue
-func (wp *workerPool) Init(handler WorkerHandler) error {
+func (wp *workerPool) Init(handler WorkerHandler) (startedWorkers int, err error) {
 	wp.tasksChan = make(chan interface{}, wp.workersCount)
 	wp.results = make(map[string]Identifiable)
 
@@ -60,6 +61,7 @@ func (wp *workerPool) Init(handler WorkerHandler) error {
 	// start workers
 	for i := 0; i < wp.workersCount; i++ {
 		wp.workers.Add(1)
+		startedWorkers++
 
 		go func() {
 			defer func() {
@@ -77,7 +79,7 @@ func (wp *workerPool) Init(handler WorkerHandler) error {
 			}
 		}()
 	}
-	return nil
+	return startedWorkers, nil
 }
 
 // Dispatch adds the given value to the results if it's not there yet and
@@ -102,10 +104,10 @@ func (wp *workerPool) addResult(idn Identifiable) bool {
 
 	if _, exists := wp.results[idn.Id()]; !exists {
 		wp.results[idn.Id()] = idn
-		wp.logger.Debug("WorkerPool: collected result", idn)
+		wp.logger.Debug(fmt.Sprintf("WorkerPool: collected result (key %s)", idn.Id()), utils.InJSON(idn))
 		return true
 	} else {
-		wp.logger.Debug("WorkerPool: result already collected, skip it", idn)
+		wp.logger.Debug(fmt.Sprintf("WorkerPool: result (key %s), already collected, skip it", idn.Id()), utils.InJSON(idn))
 		return false
 	}
 }
@@ -121,6 +123,9 @@ func (wp *workerPool) WaitFinalize() {
 
 // Results gets final results or arises error if workers are still running
 func (wp *workerPool) Results() ([]interface{}, error) {
+	wp.resultsLocker.Lock()
+	defer wp.resultsLocker.Unlock()
+
 	if !wp.isFinalized {
 		err := fmt.Errorf("WorkerPool: workers are still running. Results not ready yet")
 		wp.logger.Error(err.Error())

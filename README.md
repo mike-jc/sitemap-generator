@@ -51,7 +51,7 @@ The mandatory command argument is URL from which the site is started to be scann
 
 ```shell
     cd service-scim
-    go test ./...
+    go test -timeout 3s ./...
 ```
 
 ## TODOs
