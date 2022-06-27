@@ -5,11 +5,12 @@ import (
 	"os"
 	"sitemap-generator/cmd/siteGenerator/options"
 	"sitemap-generator/pkg/crawlers"
-	"sitemap-generator/pkg/crawlers/models"
+	crawlersModels "sitemap-generator/pkg/crawlers/models"
 	"sitemap-generator/pkg/parsers"
 	"sitemap-generator/pkg/readers"
 	"sitemap-generator/pkg/workerPools"
 	"sitemap-generator/pkg/writers"
+	writersModels "sitemap-generator/pkg/writers/models"
 	"sitemap-generator/services"
 	"sitemap-generator/utils"
 )
@@ -53,24 +54,29 @@ func main() {
 		MaxRedirects: opts.MaxRedirects,
 	})
 	parser := parsers.NewParser()
-	sw := writers.NewSitemapWriter(file)
 	crawler := crawlers.NewCrawler(crawlers.CrawlerOptions{
-		MaxDepth:      opts.MaxDepth,
-		Logger:        logger,
-		WorkerPool:    wPool,
-		Reader:        reader,
-		Parser:        parser,
-		SitemapWriter: sw,
+		MaxDepth:   opts.MaxDepth,
+		Logger:     logger,
+		WorkerPool: wPool,
+		Reader:     reader,
+		Parser:     parser,
 	})
 
 	// traverse the start URL recursively
-	var urls []*models.Url
+	var urls []*crawlersModels.Url
 	if urls, err = crawler.Traverse(opts.StartUrl); err != nil {
 		logger.Fatal("Error while scanning", err.Error())
 	}
 
 	// build sitemap XML and write it to the output file
-	if err = crawler.WriteSitemap(urls); err != nil {
+	sitemap := writersModels.Sitemap{}
+	sitemap.Urls = make([]writersModels.SiteUrl, len(urls))
+	for i, u := range urls {
+		sitemap.Urls[i] = writersModels.BuildSitemapUrl(u.Location, u.LastModified)
+	}
+
+	sw := writers.NewSitemapWriter(file)
+	if err = sw.Write(sitemap); err != nil {
 		logger.Fatal("Error while write to sitemap", err.Error())
 	}
 }

@@ -6,94 +6,68 @@ import (
 	"sitemap-generator/pkg/parsers"
 	"sitemap-generator/pkg/readers"
 	"sitemap-generator/pkg/workerPools"
-	"sitemap-generator/pkg/writers"
-	writersModels "sitemap-generator/pkg/writers/models"
 	"sitemap-generator/services"
 	"sitemap-generator/utils"
+	"sync"
 )
 
 type CrawlerOptions struct {
-	MaxDepth      int
-	Logger        services.Logger
-	WorkerPool    workerPools.WorkerPool
-	Reader        readers.Reader
-	Parser        parsers.Parser
-	SitemapWriter writers.SitemapWriter
+	MaxDepth   int
+	Logger     services.Logger
+	Reader     readers.Reader
+	Parser     parsers.Parser
+	WorkerPool workerPools.WorkerPool
 }
 
 type Crawler interface {
 	Traverse(startUrl string) ([]*models.Url, error)
-	WriteSitemap(urls []*models.Url) error
 }
 
 type crawler struct {
 	maxDepth int
 
 	logger     services.Logger
+	reader     readers.Reader
+	parser     parsers.Parser
 	workerPool workerPools.WorkerPool
 
-	reader readers.Reader
-	parser parsers.Parser
-
-	sitemapWriter writers.SitemapWriter
+	resultsLocker sync.Mutex
+	urls          map[string]*models.Url
 }
 
 func NewCrawler(opts CrawlerOptions) Crawler {
 	return &crawler{
-		maxDepth:      opts.MaxDepth,
-		logger:        opts.Logger,
-		workerPool:    opts.WorkerPool,
-		reader:        opts.Reader,
-		parser:        opts.Parser,
-		sitemapWriter: opts.SitemapWriter,
+		maxDepth:   opts.MaxDepth,
+		logger:     opts.Logger,
+		reader:     opts.Reader,
+		parser:     opts.Parser,
+		workerPool: opts.WorkerPool,
 	}
 }
 
 func (c *crawler) Traverse(startUrl string) ([]*models.Url, error) {
-	urls := make([]*models.Url, 0)
+	c.urls = make(map[string]*models.Url)
 
-	// get links from the start URL
-	c.logger.Debug("Crawler: starting initial scan", startUrl)
-	result, err := c.scanUrlForLinks(&models.CrawlerContext{
-		Location: startUrl,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(result) == 0 {
-		c.logger.Debug("Crawler: no links extracted by following the start URL")
-		return urls, nil
-	}
-	c.logger.Debug("Crawler: scanned the start URL", utils.InJSON(result))
-
-	// handler processes URL extracting all links from the page
+	// a wrap to cast input to the needed type
 	var handler workerPools.WorkerHandler = func(v interface{}) error {
-		ctx, ok := v.(*models.CrawlerContext)
+		ctx, ok := v.(models.CrawlerContext)
 		if !ok {
-			return fmt.Errorf("Crawler: unknown type of input: %T", v)
+			return fmt.Errorf("Crawler: unknown type of input in worker handler: %T", v)
 		}
-
-		c.logger.Debug("Crawler: starting to scan URL", startUrl)
-		if result, err := c.scanUrlForLinks(ctx); err != nil {
-			return err
-		} else {
-			c.logger.Debug("Crawler: scanned URL. Dispatching", utils.InJSON(result))
-			for _, r := range result {
-				c.workerPool.Dispatch(r, c.needsTask)
-			}
-			return nil
-		}
+		return c.traverseIteration(ctx)
 	}
 
-	// start workers and add all links extracted from the start URL to the task queue
 	if _, err := c.workerPool.Init(handler); err != nil {
 		return nil, fmt.Errorf("Crawler: could not initialize worker pool: %s", err.Error())
 	}
 	c.logger.Debug("Crawler: worker pool initialized")
 
-	// collect initial results and put necessary tasks to the queue
-	for _, r := range result {
-		c.workerPool.Dispatch(r, c.needsTask)
+	// analyze the start URL, collect links and put initial tasks to the queue
+	err := c.traverseIteration(models.CrawlerContext{
+		Location: startUrl,
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	// wait until all links extracted or max depth is reached
@@ -101,23 +75,38 @@ func (c *crawler) Traverse(startUrl string) ([]*models.Url, error) {
 	c.logger.Debug("Crawler: tasks completed")
 
 	// convert to necessary result type
-	results, _ := c.workerPool.Results()
-	for _, r := range results {
-		if ctx, ok := r.(*models.CrawlerContext); ok {
-			urls = append(urls, &models.Url{
-				Location:     ctx.Location,
-				LastModified: ctx.LastModified,
-			})
-		} else {
-			c.logger.Warn(fmt.Sprintf("Crawler: wrong type of worker pool's result: %T", r))
-		}
+	results := make([]*models.Url, 0)
+	for _, u := range c.urls {
+		results = append(results, u)
 	}
 
-	return urls, nil
+	return results, nil
 }
 
-func (c *crawler) scanUrlForLinks(ctx *models.CrawlerContext) ([]*models.CrawlerContext, error) {
-	result := make([]*models.CrawlerContext, 0)
+func (c *crawler) traverseIteration(ctx models.CrawlerContext) error {
+	c.logger.Debug("Crawler: starting to scan URL", ctx)
+	result, err := c.scanUrlForLinks(ctx)
+	if err != nil {
+		return err
+	}
+	c.logger.Debug("Crawler: URL scanned", utils.InJSON(result))
+
+	// add to result and produce new task if needed
+	for _, r := range result {
+		added := c.addResult(&models.Url{
+			Location:     r.Location,
+			LastModified: r.LastModified,
+		})
+		if added {
+			c.dispatch(r)
+		}
+	}
+	c.logger.Debug("Crawler: scan result dispatched")
+	return nil
+}
+
+func (c *crawler) scanUrlForLinks(ctx models.CrawlerContext) ([]models.CrawlerContext, error) {
+	result := make([]models.CrawlerContext, 0)
 
 	c.logger.Debug("Crawler: starting to read URL", ctx)
 	body, err := c.reader.ReadUrl(ctx.Location)
@@ -138,10 +127,8 @@ func (c *crawler) scanUrlForLinks(ctx *models.CrawlerContext) ([]*models.Crawler
 		c.logger.Debug("Crawler: checking if URL acceptable", u)
 		urlInfo, err := c.reader.CheckUrl(u)
 
-		if err != nil {
-			c.logger.Warn("Crawler: could not read URL while checking", u, err.Error())
-		} else {
-			uCtx := &models.CrawlerContext{
+		if err == nil {
+			uCtx := models.CrawlerContext{
 				Location:     u,
 				LastModified: urlInfo.LastModified,
 				IsHtml:       urlInfo.IsHtml,
@@ -149,41 +136,41 @@ func (c *crawler) scanUrlForLinks(ctx *models.CrawlerContext) ([]*models.Crawler
 			}
 			result = append(result, uCtx)
 			c.logger.Debug("Crawler: checked URL", uCtx)
+		} else {
+			c.logger.Warn("Crawler: could not read URL while checking", u, err.Error())
 		}
 	}
 	return result, nil
 }
 
-func (c *crawler) needsTask(v interface{}) bool {
-	ctx, ok := v.(*models.CrawlerContext)
-	if !ok {
-		c.logger.Error(fmt.Sprintf("Crawler: unknown type of input while checking if result needs a task to be processed: %T", v))
-		return false
-	}
-
-	c.logger.Debug("Crawler: checking if result needs a task to be processed", ctx)
+// dispatch adds a task to the queue if needed
+func (c *crawler) dispatch(ctx models.CrawlerContext) {
 	if ctx.IsHtml {
 		c.logger.Debug("Crawler: URL is HTML page", ctx)
 		if ctx.Depth < c.maxDepth {
-			return true
+			c.workerPool.AddTask(ctx)
 		} else {
 			c.logger.Info(fmt.Sprintf("Crawler: skip scanning, would be too deep for max depth %d", c.maxDepth), ctx)
-			return false
+			return
 		}
 	} else {
 		c.logger.Debug("Crawler: not HTML page, skip it", ctx)
-		return false
+		return
 	}
 }
 
-func (c *crawler) WriteSitemap(urls []*models.Url) error {
-	data := writersModels.Sitemap{}
+// addResult collects URL if it's not yet in the list and returns *true*;
+// URL list is being locked while reading from and writing in
+func (c *crawler) addResult(url *models.Url) bool {
+	c.resultsLocker.Lock()
+	defer c.resultsLocker.Unlock()
 
-	data.Urls = make([]writersModels.SiteUrl, len(urls))
-	for i, u := range urls {
-		data.Urls[i] = writersModels.BuildSitemapUrl(u.Location, u.LastModified)
+	if _, exists := c.urls[url.Location]; !exists {
+		c.urls[url.Location] = url
+		c.logger.Debug("Crawler: collected URL", utils.InJSON(url))
+		return true
+	} else {
+		c.logger.Debug("Crawler: URL already collected, skip it", utils.InJSON(url))
+		return false
 	}
-
-	c.logger.Debug("Crawler: prepared sitemap data", data.Urls)
-	return c.sitemapWriter.Write(data)
 }

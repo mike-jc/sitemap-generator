@@ -6,41 +6,31 @@ import (
 	"sitemap-generator/pkg/workerPools"
 	"sitemap-generator/services"
 	"sitemap-generator/utils"
-	"strconv"
 	"testing"
 )
-
-type idn int
-
-func (i *idn) Id() string {
-	return strconv.Itoa(int(*i))
-}
 
 func TestNewWorkerPool(t *testing.T) {
 	logger, err := services.NewLogger(os.Stderr, "testing", "error")
 	utils.AssertNoError(t, err)
 
 	workersCount := 2
-	tasks := []idn{3, 11, 33}
-	expectedResults := []int{3, 11, 33, 4, 5, 34, 35}
+	tasks := []int{3, 10, 32}
+	expectedResults := []int{3, 10, 32, 12, 33}
 
+	results := make([]int, 0)
 	wp := workerPools.NewWorkerPool(logger, workersCount)
 
-	var needsTask workerPools.NeedsTaskFunc = func(v interface{}) bool {
-		if i, ok := v.(*idn); ok {
-			ii := int(*i)
-			// require task for number divisible by 3
-			return ii%3 == 0
-		}
-		return false
-	}
 	var handler workerPools.WorkerHandler = func(v interface{}) error {
-		if i, ok := v.(*idn); ok {
-			ii := int(*i)
-			// produce new input
+		if i, ok := v.(int); ok {
+			// collect result
+			results = append(results, i)
+
+			// produce new input and decide if new task is needed
 			for j := 1; j <= 2; j++ {
-				task := idn(ii + j)
-				wp.Dispatch(&task, needsTask)
+				task := i + j
+				if task%3 == 0 {
+					wp.AddTask(task)
+				}
 			}
 			return nil
 		}
@@ -51,24 +41,10 @@ func TestNewWorkerPool(t *testing.T) {
 	utils.AssertNoError(t, wpErr)
 	utils.AssertEqual(t, startedWorkers, workersCount)
 
-	for _, task := range tasks {
-		func(task idn) {
-			wp.Dispatch(&task, needsTask)
-		}(task)
+	// initial iteration
+	for _, t := range tasks {
+		_ = handler(t)
 	}
-
 	wp.WaitFinalize()
-
-	results := make([]int, 0)
-	wpResults, _ := wp.Results()
-
-	for _, r := range wpResults {
-		if i, ok := r.(*idn); ok {
-			ii := int(*i)
-			results = append(results, ii)
-		} else {
-			t.Errorf("wrong type of worker pool's result: %T", r)
-		}
-	}
 	utils.AssertEqualSlices(t, results, expectedResults)
 }
