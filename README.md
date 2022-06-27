@@ -54,7 +54,11 @@ The mandatory command argument is URL from which the site is started to be scann
     go test -timeout 3s ./...
 ```
 
-## TODOs
+## Improvements to be considered
+
+* When halt the app (e.g. by Ctrl+C), write all already found links to sitemap file. Currently it's being written at the end of the traversing
+
+## Technical TODOs
 
 * Use a docker to run a command (Dockerfile, docker-compose.yml)
 * Use third-party libraries:
